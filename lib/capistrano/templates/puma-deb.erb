@@ -24,6 +24,10 @@ SCRIPTNAME=/etc/init.d/$NAME
 CONFIG=<%=fetch(:puma_jungle_conf)%>
 JUNGLE=`cat $CONFIG`
 RUNPUMA=<%=fetch(:puma_run_path)%>
+TOKEN=<%=fetch(:puma_control_app_token)%>
+GREEN='\033[1;32m'
+RED='\033[0;31m'
+NC='\033[0m'
 
 # Load the VERBOSE setting and other rcS variables
 . /lib/init/vars.sh
@@ -54,7 +58,8 @@ do_start() {
 
 do_start_one() {
   PIDFILE=$1/tmp/pids/puma.pid
-  if [ -e $PIDFILE ]; then
+  CTLFILE=$1/tmp/sockets/pumactl.sock
+  if [ -e $CTLFILE ]; then
     PID=`cat $PIDFILE`
     # If the puma isn't running, run it, otherwise restart it.
     if [ "`ps -A -o pid= | grep -c $PID`" -eq 0 ]; then
@@ -68,18 +73,14 @@ do_start_one() {
 }
 
 do_start_one_do() {
-  log_daemon_msg "--> Woke up puma $1"
-  log_daemon_msg "user $2"
-  log_daemon_msg "log to $4"
-  log_daemon_msg "start-stop-daemon --verbose --start --chdir $1 --chuid $2 --background --exec $RUNPUMA $1 "
-  start-stop-daemon --verbose --start --chdir $1 --chuid $2 --background --exec $RUNPUMA -- $1
+  log_daemon_msg "--> Running $1"
+  su - deploy -c "cd $1;puma -d 1> /dev/null"
 }
 
 #
 # Function that stops the jungle
 #
 do_stop() {
-  log_daemon_msg "=> Putting all the beasts to bed..."
   for i in $JUNGLE; do
     dir=`echo $i | cut -d , -f 1`
     user=`echo $i | cut -d , -f 2`
@@ -90,21 +91,18 @@ do_stop() {
 # Function that stops the daemon/service
 #
 do_stop_one() {
-  log_daemon_msg "--> Stopping $1"
   PIDFILE=$1/tmp/pids/puma.pid
-  STATEFILE=$1/tmp/pids/puma.state
-  if [ -e $PIDFILE ]; then
+  CTLFILE=$1/tmp/sockets/pumactl.sock
+  if [ -e $CTLFILE ]; then
     PID=`cat $PIDFILE`
     if [ "`ps -A -o pid= | grep -c $PID`" -eq 0 ]; then
-      log_daemon_msg "---> Puma $1 isn't running."
+      log_daemon_msg "--> Puma $1 isn't running."
     else
-      log_daemon_msg "---> About to kill PID `cat $PIDFILE`"
-      su - $2 -c "pumactl --state $STATEFILE stop"
-      # Many daemons don't delete their pidfiles when they exit.
-      rm -f $PIDFILE $STATEFILE
+      log_daemon_msg "--> About to stop $1 (PID: `cat $PIDFILE`)"
+      su - $2 -c "pumactl -C unix://$CTLFILE -T $TOKEN stop"
     fi
   else
-    log_daemon_msg "---> No puma here..."
+    log_daemon_msg "--> $1 ${RED}isn't running${NC}"
   fi
   return 0
 }
@@ -125,12 +123,13 @@ do_restart() {
 #
 do_restart_one() {
   PIDFILE=$1/tmp/pids/puma.pid
+  CTLFILE=$1/tmp/sockets/pumactl.sock
   i=`grep $1 $CONFIG`
   dir=`echo $i | cut -d , -f 1`
 
-  if [ -e $PIDFILE ]; then
+  if [ -e $CTLFILE ]; then
     log_daemon_msg "--> About to restart puma $1"
-    su - $2 -c "pumactl --state $dir/tmp/pids/puma.state restart"
+    log_daemon_msg "--> ${GREEN}$(su - $2 -c "pumactl -C unix://$CTLFILE -T $TOKEN restart --daemon")${NC}"
     # kill -s USR2 `cat $PIDFILE`
     # TODO Check if process exist
   else
@@ -165,17 +164,14 @@ do_status() {
 # Function that sends a SIGUSR2 to the daemon/service
 #
 do_status_one() {
-  PIDFILE=$1/tmp/pids/puma.pid
+  CTLFILE=$1/tmp/sockets/pumactl.sock
   i=`grep $1 $CONFIG`
   dir=`echo $i | cut -d , -f 1`
-
-  if [ -e $PIDFILE ]; then
-    log_daemon_msg "--> About to status puma $1"
-
-    su - $2 -c "pumactl --state $dir/tmp/pids/puma.state stats "
-
+  if [ -e $CTLFILE ]; then
+    PID=$(cat $1/tmp/pids/puma.pid)
+    log_daemon_msg "--> $1: ${GREEN}$(su - $2 -c "pumactl -C unix://$dir/tmp/sockets/pumactl.sock status")${NC} (PID: $PID)"
   else
-    log_daemon_msg "--> $1 isn't there :(..."
+    log_daemon_msg "--> $1 ${RED}isn't running${NC}"
   fi
   return 0
 }
@@ -269,7 +265,6 @@ case "$1" in
   ;;
   status)
     # TODO Implement.
-    log_daemon_msg "Status $DESC" "$NAME"
     if [ "$#" -eq 1 ]; then
       do_status
     else
